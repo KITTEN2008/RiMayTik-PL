@@ -1,8 +1,22 @@
+# Ri Language v4.7.1 - Компилятор с поддержкой отладки
+# Copyright (c) 2024 Ri Development Team
 import re
 import sys
 import math
 import time
+import random
 from typing import List, Dict, Any, Optional
+RI_LANGUAGE_VERSION = "4.7.1"
+RI_LANGUAGE_FEATURES = [
+    "Переменные и типы данных",
+    "Условные операторы и циклы", 
+    "Графические примитивы",
+    "Обработка событий мыши/клавиатуры",
+    "Базовые математические операции",
+    "Отладка (новое в 4.7.0)",
+    "Встроенные функции (новое в 4.7.1)",
+    "Списки и массивы (новое в 4.7.1)"
+]
 class RiCompiler:
     def __init__(self):
         self.variables = {}
@@ -15,19 +29,55 @@ class RiCompiler:
         self.last_mouse_pressed = False
         self.last_key = ""
         
-    def execute(self, code: str, graphics_callback=None, input_callback=None, event_callback=None):
-        """Выполняет код на Ri"""
+        # Отладочные переменные
+        self.debug_mode = False
+        self.is_paused = False
+        self.current_line_num = 0
+        self.call_stack = []
+        self.breakpoints = set()
+        self.debug_callback = None
+        self.step_mode = "run"  # 'run', 'step_over', 'step_into', 'step_out'
+        self.step_depth = 0
+        
+        # Списки (новое в 4.7.1)
+        self.lists = {}
+        
+    def execute(self, code: str, graphics_callback=None, input_callback=None, 
+                event_callback=None, debug_callback=None):
+        """Выполняет код на Ri с поддержкой отладки"""
+        self.debug_callback = debug_callback
         self.variables = {}
         self.output_lines = []
         self.graphics_commands = []
         self.has_graphics = False
         self.event_handlers = {}
+        self.lists = {}
         
         lines = code.strip().split('\n')
         i = 0
         
         while i < len(lines):
             line = lines[i].strip()
+            self.current_line_num = i + 1
+            
+            # Проверка точки останова
+            if self._check_breakpoint(self.current_line_num):
+                if self.debug_callback:
+                    self.debug_callback("breakpoint_hit", self.current_line_num)
+                # Ждем, пока отладчик не разрешит продолжение
+                while self.is_paused:
+                    time.sleep(0.01)
+                    if not self.debug_mode:
+                        break
+            
+            # Проверка режима пошагового выполнения
+            if self.debug_mode and self.step_mode != "run":
+                if self._should_step():
+                    self.is_paused = True
+                    if self.debug_callback:
+                        self.debug_callback("step_hit", self.current_line_num)
+                    while self.is_paused:
+                        time.sleep(0.01)
             
             if not line or line.startswith('//'):
                 i += 1
@@ -37,6 +87,11 @@ class RiCompiler:
                 line = line.split('//')[0].strip()
             
             try:
+                # Обновляем отладочную информацию
+                if self.debug_callback:
+                    self.debug_callback("line_executed", self.current_line_num)
+                    self.debug_callback("variables_updated", self.variables)
+                
                 if line.startswith('перем '):
                     self.handle_var_declaration(line[5:].strip())
                     
@@ -64,6 +119,27 @@ class RiCompiler:
                     
                 elif line.startswith('цикл '):
                     i = self.handle_while(lines, i, input_callback, event_callback)
+                    
+                elif line.startswith('функция '):
+                    # Сохраняем позицию для отладки
+                    func_name = line[8:].strip().split('(')[0]
+                    self.call_stack.append(f"функция {func_name} (строка {i+1})")
+                    if self.debug_callback:
+                        self.debug_callback("call_stack_updated", self.call_stack)
+                    
+                    # Пропускаем определение функции (упрощенная реализация)
+                    end_pos = self.find_block_end(lines, i, 'функция')
+                    i = end_pos
+                    self.call_stack.pop()
+                    
+                elif line.startswith('список '):
+                    self.handle_list_declaration(line[6:].strip())
+                    
+                elif line.startswith('добавить '):
+                    self.handle_list_append(line[8:].strip())
+                    
+                elif line.startswith('удалить '):
+                    self.handle_list_remove(line[7:].strip())
                     
                 elif line.startswith('окно '):
                     self.handle_window_command(line[4:].strip())
@@ -111,7 +187,6 @@ class RiCompiler:
                         self.variables['мышь_нажата'] = self.last_mouse_pressed
                     
                 elif line.startswith('клавиша_нажата('):
-                    # Извлекаем код клавиши
                     if ')' in line:
                         key_code = line[14:].split(')')[0].strip().strip('"\'')
                         if event_callback:
@@ -122,6 +197,8 @@ class RiCompiler:
                     self.graphics_commands.append(('update',))
                     
                 elif line.startswith('остановить()'):
+                    if self.debug_callback:
+                        self.debug_callback("program_stopped", "")
                     break
                     
                 elif line == 'конец':
@@ -131,8 +208,17 @@ class RiCompiler:
                     pass
                     
                 else:
-                    # Пытаемся обработать как присваивание без 'перем'
-                    if '=' in line:
+                    # Проверяем, является ли строка вызовом функции
+                    if '(' in line and ')' in line and not line.startswith('//'):
+                        func_name = line.split('(')[0].strip()
+                        if func_name in self.builtin_functions:
+                            result = self.call_builtin_function(line)
+                            if result is not None:
+                                # Ищем присваивание
+                                if '=' in line:
+                                    var_name = line.split('=')[0].strip()
+                                    self.variables[var_name] = result
+                    elif '=' in line:
                         parts = line.split('=')
                         if len(parts) == 2:
                             var_name = parts[0].strip()
@@ -141,7 +227,10 @@ class RiCompiler:
                             self.variables[var_name] = value
                             
             except Exception as e:
-                self.output_lines.append(f"Ошибка в строке {i+1}: {str(e)}")
+                error_msg = f"Ошибка в строке {i+1}: {str(e)}"
+                self.output_lines.append(error_msg)
+                if self.debug_callback:
+                    self.debug_callback("error", error_msg)
                 
             i += 1
         
@@ -151,6 +240,33 @@ class RiCompiler:
         
         return '\n'.join(self.output_lines)
     
+    def _check_breakpoint(self, line_num):
+        """Проверяет, нужно ли остановиться на точке останова"""
+        return line_num in self.breakpoints and self.debug_mode and not self.is_paused
+    
+    def _should_step(self):
+        """Определяет, нужно ли остановиться для пошагового выполнения"""
+        if self.step_mode == "step_over":
+            return len(self.call_stack) <= self.step_depth
+        elif self.step_mode == "step_into":
+            return True
+        elif self.step_mode == "step_out":
+            return len(self.call_stack) < self.step_depth
+        return False
+    
+    def find_block_end(self, lines, start_idx, block_type):
+        """Находит конец блока (функции, если, цикла)"""
+        depth = 0
+        for j in range(start_idx, len(lines)):
+            line = lines[j].strip()
+            if line.startswith(block_type) or line.startswith('если ') or line.startswith('цикл '):
+                depth += 1
+            elif line == 'конец':
+                depth -= 1
+                if depth == 0:
+                    return j
+        return len(lines) - 1
+    
     def handle_var_declaration(self, line):
         """Обработка объявления переменной"""
         if '=' in line:
@@ -159,6 +275,53 @@ class RiCompiler:
             expr = parts[1].strip()
             value = self.evaluate_expression(expr)
             self.variables[var_name] = value
+    
+    def handle_list_declaration(self, line):
+        """Обработка объявления списка (новое в 4.7.1)"""
+        if '=' in line:
+            parts = line.split('=')
+            list_name = parts[0].strip()
+            expr = parts[1].strip()
+            
+            if expr.startswith('[') and expr.endswith(']'):
+                # Парсим список
+                items_str = expr[1:-1].strip()
+                if items_str:
+                    items = []
+                    for item in items_str.split(','):
+                        item = item.strip()
+                        items.append(self.evaluate_expression(item))
+                    self.lists[list_name] = items
+                else:
+                    self.lists[list_name] = []
+            else:
+                # Инициализация пустым списком
+                self.lists[list_name] = []
+    
+    def handle_list_append(self, line):
+        """Добавление элемента в список"""
+        parts = line.split(',')
+        if len(parts) >= 2:
+            list_name = parts[0].strip()
+            value_expr = parts[1].strip()
+            value = self.evaluate_expression(value_expr)
+            
+            if list_name in self.lists:
+                self.lists[list_name].append(value)
+    
+    def handle_list_remove(self, line):
+        """Удаление элемента из списка"""
+        parts = line.split(',')
+        if len(parts) >= 2:
+            list_name = parts[0].strip()
+            index_expr = parts[1].strip()
+            
+            try:
+                index = self.evaluate_expression(index_expr)
+                if list_name in self.lists and 0 <= index < len(self.lists[list_name]):
+                    del self.lists[list_name][index]
+            except:
+                pass
     
     def handle_print(self, expr):
         """Обработка команды вывода"""
@@ -248,15 +411,21 @@ class RiCompiler:
         
         # Выполняем цикл
         iteration_count = 0
-        max_iterations = 10000  # Увеличили для игр
+        max_iterations = 10000
         
         while self.evaluate_expression(condition_expr) and iteration_count < max_iterations:
+            # Добавляем информацию в стек вызовов
+            self.call_stack.append(f"цикл (строка {start_idx+1}, итерация {iteration_count+1})")
+            if self.debug_callback:
+                self.debug_callback("call_stack_updated", self.call_stack)
+            
             # Выполняем тело цикла
             k = start_idx + 1
             while k < end_pos:
                 self.execute_single_line(lines[k].strip(), input_callback, event_callback)
                 k += 1
             
+            self.call_stack.pop()
             iteration_count += 1
             
             if not self.evaluate_expression(condition_expr):
@@ -403,9 +572,129 @@ class RiCompiler:
             if event_callback:
                 event_callback("set_handler", f"{event_type}:{handler_name}")
     
+    # Встроенные функции (новое в 4.7.1)
+    @property
+    def builtin_functions(self):
+        return {
+            'случайно': self.builtin_random,
+            'длина': self.builtin_length,
+            'корень': self.builtin_sqrt,
+            'синус': self.builtin_sin,
+            'косинус': self.builtin_cos,
+            'округлить': self.builtin_round,
+            'строка': self.builtin_str,
+            'число': self.builtin_num,
+            'тип': self.builtin_type,
+            'время': self.builtin_time,
+            'список_длина': self.builtin_list_length,
+            'элемент': self.builtin_list_element,
+        }
+    
+    def call_builtin_function(self, line):
+        """Вызывает встроенную функцию"""
+        func_name = line.split('(')[0].strip()
+        args_str = line.split('(')[1].split(')')[0].strip()
+        
+        if func_name in self.builtin_functions:
+            args = []
+            if args_str:
+                for arg in args_str.split(','):
+                    args.append(self.evaluate_expression(arg.strip()))
+            
+            return self.builtin_functions[func_name](*args)
+        return None
+    
+    def builtin_random(self, min_val=0, max_val=1):
+        """случайно(min, max) - случайное число в диапазоне"""
+        return random.randint(int(min_val), int(max_val))
+    
+    def builtin_length(self, value):
+        """длина(value) - длина строки или списка"""
+        if isinstance(value, str):
+            return len(value)
+        elif value in self.lists:
+            return len(self.lists[value])
+        return 0
+    
+    def builtin_sqrt(self, value):
+        """корень(value) - квадратный корень"""
+        return math.sqrt(float(value))
+    
+    def builtin_sin(self, value):
+        """синус(value) - синус угла в радианах"""
+        return math.sin(float(value))
+    
+    def builtin_cos(self, value):
+        """косинус(value) - косинус угла в радианах"""
+        return math.cos(float(value))
+    
+    def builtin_round(self, value, decimals=0):
+        """округлить(value, decimals) - округление числа"""
+        return round(float(value), int(decimals))
+    
+    def builtin_str(self, value):
+        """строка(value) - преобразование в строку"""
+        return str(value)
+    
+    def builtin_num(self, value):
+        """число(value) - преобразование в число"""
+        try:
+            if '.' in str(value):
+                return float(value)
+            return int(value)
+        except:
+            return 0
+    
+    def builtin_type(self, value):
+        """тип(value) - тип переменной"""
+        if isinstance(value, int):
+            return "целое"
+        elif isinstance(value, float):
+            return "дробное"
+        elif isinstance(value, str):
+            return "строка"
+        elif isinstance(value, bool):
+            return "булево"
+        return "неизвестно"
+    
+    def builtin_time(self):
+        """время() - текущее время в миллисекундах"""
+        return int(time.time() * 1000)
+    
+    def builtin_list_length(self, list_name):
+        """список_длина(имя_списка) - длина списка"""
+        if list_name in self.lists:
+            return len(self.lists[list_name])
+        return 0
+    
+    def builtin_list_element(self, list_name, index):
+        """элемент(имя_списка, индекс) - элемент списка по индексу"""
+        if list_name in self.lists and 0 <= index < len(self.lists[list_name]):
+            return self.lists[list_name][index]
+        return 0
+    
     def evaluate_expression(self, expr: str):
         """Вычисляет значение выражения"""
         expr = expr.strip()
+        
+        # Проверяем, является ли выражение вызовом функции
+        if '(' in expr and ')' in expr:
+            func_name = expr.split('(')[0].strip()
+            if func_name in self.builtin_functions:
+                return self.call_builtin_function(expr)
+        
+        # Проверяем, является ли выражение доступом к элементу списка
+        if '[' in expr and ']' in expr:
+            list_name = expr.split('[')[0].strip()
+            index_expr = expr.split('[')[1].split(']')[0].strip()
+            
+            if list_name in self.lists:
+                try:
+                    index = self.evaluate_expression(index_expr)
+                    if 0 <= index < len(self.lists[list_name]):
+                        return self.lists[list_name][index]
+                except:
+                    pass
         
         # Обработка скобок
         if '(' in expr and ')' in expr:
@@ -498,6 +787,13 @@ class RiCompiler:
                     return self._evaluate_simple(parts[0].strip()) / denominator
                 return 0
         
+        if '^' in expr:
+            parts = expr.split('^')
+            if len(parts) == 2:
+                base = self._evaluate_simple(parts[0].strip())
+                exponent = self._evaluate_simple(parts[1].strip())
+                return base ** exponent
+        
         # Если ничего не подошло, пробуем как простое значение
         return self._evaluate_simple(expr)
     
@@ -507,6 +803,15 @@ class RiCompiler:
         
         if expr.startswith('"') and expr.endswith('"'):
             return expr[1:-1]
+        
+        if expr.startswith("'") and expr.endswith("'"):
+            return expr[1:-1]
+        
+        # Проверяем, является ли выражение списком
+        if expr.startswith('[') and expr.endswith(']'):
+            # Это список, но мы его уже обработали в handle_list_declaration
+            # Здесь просто возвращаем строковое представление
+            return expr
         
         try:
             if '.' in expr:
@@ -518,6 +823,10 @@ class RiCompiler:
         
         if expr in self.variables:
             return self.variables[expr]
+        
+        # Проверяем списки
+        if expr in self.lists:
+            return f"список[{len(self.lists[expr])} элементов]"
         
         if expr.lower() == 'истина':
             return True
@@ -544,7 +853,57 @@ class RiCompiler:
             return value.lower() not in ['', '0', 'ложь', 'false']
         else:
             return bool(value)
-def run_ri_code(code: str, graphics_callback=None, input_callback=None, event_callback=None) -> str:
+    
+    # Методы отладки
+    def add_breakpoint(self, line_num):
+        """Добавляет точку останова"""
+        self.breakpoints.add(line_num)
+    
+    def remove_breakpoint(self, line_num):
+        """Удаляет точку останова"""
+        if line_num in self.breakpoints:
+            self.breakpoints.remove(line_num)
+    
+    def pause_execution(self):
+        """Приостанавливает выполнение"""
+        self.is_paused = True
+    
+    def continue_execution(self):
+        """Продолжает выполнение"""
+        self.is_paused = False
+        self.step_mode = "run"
+    
+    def step_over(self):
+        """Шаг вперед (не заходя в функции)"""
+        self.is_paused = False
+        self.step_mode = "step_over"
+        self.step_depth = len(self.call_stack)
+    
+    def step_into(self):
+        """Шаг внутрь (заходит в функции)"""
+        self.is_paused = False
+        self.step_mode = "step_into"
+    
+    def step_out(self):
+        """Шаг наружу (выходит из функции)"""
+        self.is_paused = False
+        self.step_mode = "step_out"
+        self.step_depth = max(0, len(self.call_stack) - 1)
+    
+    def get_variables(self):
+        """Возвращает текущие переменные для отладчика"""
+        return self.variables.copy()
+    
+    def get_lists(self):
+        """Возвращает текущие списки для отладчика"""
+        return self.lists.copy()
+    
+    def get_call_stack(self):
+        """Возвращает стек вызовов"""
+        return self.call_stack.copy()
+def run_ri_code(code: str, graphics_callback=None, input_callback=None, 
+                event_callback=None, debug_callback=None) -> str:
     """Запускает код на Ri"""
     compiler = RiCompiler()
-    return compiler.execute(code, graphics_callback, input_callback, event_callback)
+    return compiler.execute(code, graphics_callback, input_callback, 
+                          event_callback, debug_callback)
