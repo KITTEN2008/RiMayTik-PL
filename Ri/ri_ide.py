@@ -9,7 +9,7 @@ import time
 import os
 import subprocess
 import json
-from ri_compiler_v4_7_1 import run_ri_code, RI_LANGUAGE_VERSION
+from ri_compiler import run_ri_code, RI_LANGUAGE_VERSION
 class LineNumbers(tk.Canvas):
     """Виджет для отображения номеров строк"""
     def __init__(self, parent, text_widget, **kwargs):
@@ -2786,3 +2786,4 @@ def main():
     root.mainloop()
 if __name__ == "__main__":
     main()
+
