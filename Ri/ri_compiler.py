@@ -1,11 +1,13 @@
-# Ri Language v4.7.1 - Компилятор с поддержкой отладки
+# Ri Language v4.7.1 - Компилятор с поддержкой отладки (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 # Copyright (c) 2024 Ri Development Team
+
 import re
 import sys
 import math
 import time
 import random
 from typing import List, Dict, Any, Optional
+
 RI_LANGUAGE_VERSION = "4.7.1"
 RI_LANGUAGE_FEATURES = [
     "Переменные и типы данных",
@@ -17,6 +19,7 @@ RI_LANGUAGE_FEATURES = [
     "Встроенные функции (новое в 4.7.1)",
     "Списки и массивы (новое в 4.7.1)"
 ]
+
 class RiCompiler:
     def __init__(self):
         self.variables = {}
@@ -42,10 +45,14 @@ class RiCompiler:
         # Списки (новое в 4.7.1)
         self.lists = {}
         
+        # Для немедленной отправки графических команд
+        self.graphics_callback = None
+        
     def execute(self, code: str, graphics_callback=None, input_callback=None, 
                 event_callback=None, debug_callback=None):
         """Выполняет код на Ri с поддержкой отладки"""
         self.debug_callback = debug_callback
+        self.graphics_callback = graphics_callback  # Сохраняем callback для немедленной отправки
         self.variables = {}
         self.output_lines = []
         self.graphics_commands = []
@@ -143,30 +150,24 @@ class RiCompiler:
                     
                 elif line.startswith('окно '):
                     self.handle_window_command(line[4:].strip())
-                    self.has_graphics = True
                     
                 elif line.startswith('прямоугольник '):
                     self.handle_rectangle_command(line[13:].strip())
-                    self.has_graphics = True
                     
                 elif line.startswith('круг '):
                     self.handle_circle_command(line[4:].strip())
-                    self.has_graphics = True
                     
                 elif line.startswith('линия '):
                     self.handle_line_command(line[5:].strip())
-                    self.has_graphics = True
                     
                 elif line.startswith('текст '):
                     self.handle_text_command(line[5:].strip())
-                    self.has_graphics = True
                     
                 elif line.startswith('задержка '):
                     self.handle_delay_command(line[8:].strip())
                     
                 elif line.startswith('очистить '):
                     self.handle_clear_command(line[8:].strip())
-                    self.has_graphics = True
                     
                 elif line.startswith('установить_обработчик '):
                     self.handle_set_handler(line[20:].strip(), event_callback)
@@ -194,7 +195,11 @@ class RiCompiler:
                             self.variables[f'клавиша_{key_code}'] = key_pressed
                     
                 elif line.startswith('обновить_экран()'):
-                    self.graphics_commands.append(('update',))
+                    command = ('update',)
+                    self.graphics_commands.append(command)
+                    # Немедленно отправляем команду обновления
+                    if self.graphics_callback:
+                        self.graphics_callback([command])
                     
                 elif line.startswith('остановить()'):
                     if self.debug_callback:
@@ -234,9 +239,9 @@ class RiCompiler:
                 
             i += 1
         
-        # Если есть графика, отправляем команды
-        if self.has_graphics and graphics_callback:
-            graphics_callback(self.graphics_commands)
+        # В конце выполнения отправляем все команды для надежности
+        if self.has_graphics and self.graphics_callback and self.graphics_commands:
+            self.graphics_callback(self.graphics_commands)
         
         return '\n'.join(self.output_lines)
     
@@ -460,24 +465,18 @@ class RiCompiler:
                     self.variables[var_name] = user_input
         elif line.startswith('окно '):
             self.handle_window_command(line[4:].strip())
-            self.has_graphics = True
         elif line.startswith('прямоугольник '):
             self.handle_rectangle_command(line[13:].strip())
-            self.has_graphics = True
         elif line.startswith('круг '):
             self.handle_circle_command(line[4:].strip())
-            self.has_graphics = True
         elif line.startswith('линия '):
             self.handle_line_command(line[5:].strip())
-            self.has_graphics = True
         elif line.startswith('текст '):
             self.handle_text_command(line[5:].strip())
-            self.has_graphics = True
         elif line.startswith('задержка '):
             self.handle_delay_command(line[8:].strip())
         elif line.startswith('очистить '):
             self.handle_clear_command(line[8:].strip())
-            self.has_graphics = True
         elif line.startswith('установить_обработчик '):
             self.handle_set_handler(line[20:].strip(), event_callback)
         elif line.startswith('мышь_х()'):
@@ -493,9 +492,12 @@ class RiCompiler:
                 self.last_mouse_pressed = event_callback("get_mouse_pressed", "")
                 self.variables['мышь_нажата'] = self.last_mouse_pressed
         elif line.startswith('обновить_экран()'):
-            self.graphics_commands.append(('update',))
+            command = ('update',)
+            self.graphics_commands.append(command)
+            if self.graphics_callback:
+                self.graphics_callback([command])
     
-    # Графические команды
+    # Графические команды с немедленной отправкой
     def handle_window_command(self, params):
         """окно ширина высота [заголовок]"""
         parts = params.split()
@@ -503,7 +505,12 @@ class RiCompiler:
             width = self.evaluate_expression(parts[0])
             height = self.evaluate_expression(parts[1])
             title = "Окно Ri" if len(parts) < 3 else " ".join(parts[2:])
-            self.graphics_commands.append(('window', width, height, title))
+            command = ('window', width, height, title)
+            self.graphics_commands.append(command)
+            self.has_graphics = True
+            # Немедленно отправляем команду
+            if self.graphics_callback:
+                self.graphics_callback([command])
     
     def handle_rectangle_command(self, params):
         """прямоугольник x y ширина высота [цвет]"""
@@ -514,7 +521,12 @@ class RiCompiler:
             width = self.evaluate_expression(parts[2])
             height = self.evaluate_expression(parts[3])
             color = "черный" if len(parts) < 5 else parts[4]
-            self.graphics_commands.append(('rectangle', x, y, width, height, color))
+            command = ('rectangle', x, y, width, height, color)
+            self.graphics_commands.append(command)
+            self.has_graphics = True
+            # Немедленно отправляем команду
+            if self.graphics_callback:
+                self.graphics_callback([command])
     
     def handle_circle_command(self, params):
         """круг x y радиус [цвет]"""
@@ -523,8 +535,13 @@ class RiCompiler:
             x = self.evaluate_expression(parts[0])
             y = self.evaluate_expression(parts[1])
             radius = self.evaluate_expression(parts[2])
-            color = "черный" if len(parts) < 4 else parts[3]
-            self.graphics_commands.append(('circle', x, y, radius, color))
+            color = "черный" if len(parts) < 4 else parts[4]
+            command = ('circle', x, y, radius, color)
+            self.graphics_commands.append(command)
+            self.has_graphics = True
+            # Немедленно отправляем команду
+            if self.graphics_callback:
+                self.graphics_callback([command])
     
     def handle_line_command(self, params):
         """линия x1 y1 x2 y2 [цвет]"""
@@ -535,7 +552,12 @@ class RiCompiler:
             x2 = self.evaluate_expression(parts[2])
             y2 = self.evaluate_expression(parts[3])
             color = "черный" if len(parts) < 5 else parts[4]
-            self.graphics_commands.append(('line', x1, y1, x2, y2, color))
+            command = ('line', x1, y1, x2, y2, color)
+            self.graphics_commands.append(command)
+            self.has_graphics = True
+            # Немедленно отправляем команду
+            if self.graphics_callback:
+                self.graphics_callback([command])
     
     def handle_text_command(self, params):
         """текст x y "текст" [цвет]"""
@@ -548,7 +570,12 @@ class RiCompiler:
                 x = self.evaluate_expression(parts[0])
                 y = self.evaluate_expression(parts[1])
                 color = "черный" if len(parts) < 3 else parts[2]
-                self.graphics_commands.append(('text', x, y, text, color))
+                command = ('text', x, y, text, color)
+                self.graphics_commands.append(command)
+                self.has_graphics = True
+                # Немедленно отправляем команду
+                if self.graphics_callback:
+                    self.graphics_callback([command])
     
     def handle_delay_command(self, params):
         """задержка миллисекунды"""
@@ -561,7 +588,12 @@ class RiCompiler:
     def handle_clear_command(self, params):
         """очистить [цвет]"""
         color = "белый" if not params else params
-        self.graphics_commands.append(('clear', color))
+        command = ('clear', color)
+        self.graphics_commands.append(command)
+        self.has_graphics = True
+        # Немедленно отправляем команду
+        if self.graphics_callback:
+            self.graphics_callback([command])
     
     def handle_set_handler(self, params, event_callback):
         """установить_обработчик событие функция"""
@@ -901,6 +933,7 @@ class RiCompiler:
     def get_call_stack(self):
         """Возвращает стек вызовов"""
         return self.call_stack.copy()
+
 def run_ri_code(code: str, graphics_callback=None, input_callback=None, 
                 event_callback=None, debug_callback=None) -> str:
     """Запускает код на Ri"""
