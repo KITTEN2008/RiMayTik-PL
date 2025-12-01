@@ -1,5 +1,5 @@
 # Ri Language v4.7.1 - Компилятор с поддержкой отладки (ИСПРАВЛЕННАЯ ВЕРСИЯ)
-# Copyright (c) 2024 Ri Development Team
+# Copyright (c) 2025 Ri Development Team
 
 import re
 import sys
