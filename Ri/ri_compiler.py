@@ -6,7 +6,8 @@ import sys
 import math
 import time
 import random
-from typing import List, Dict, Any, Optional
+import traceback
+from typing import List, Dict, Any, Optional, Union
 
 RI_LANGUAGE_VERSION = "2.13.1"
 RI_LANGUAGE_CREATOR = "KITTEN"
@@ -46,6 +47,7 @@ class RiCompiler:
         
         self.lists = {}
         self.graphics_callback = None
+        self.user_functions = {}
         
     def execute(self, code: str, graphics_callback=None, input_callback=None, 
                 event_callback=None, debug_callback=None):
@@ -57,8 +59,9 @@ class RiCompiler:
         self.has_graphics = False
         self.event_handlers = {}
         self.lists = {}
+        self.user_functions = {}
         
-        lines = code.strip().split('\n')
+        lines = [line.rstrip('\n\r') for line in code.split('\n')]
         i = 0
         
         while i < len(lines):
@@ -106,7 +109,7 @@ class RiCompiler:
                         try:
                             if '.' in user_input:
                                 self.variables[var_name] = float(user_input)
-                            elif user_input.isdigit():
+                            elif user_input.isdigit() or (user_input.startswith('-') and user_input[1:].isdigit()):
                                 self.variables[var_name] = int(user_input)
                             else:
                                 self.variables[var_name] = user_input
@@ -117,19 +120,15 @@ class RiCompiler:
                         
                 elif line.startswith('если '):
                     i = self.handle_if(lines, i, input_callback, event_callback)
+                    continue
                     
                 elif line.startswith('цикл '):
                     i = self.handle_while(lines, i, input_callback, event_callback)
+                    continue
                     
                 elif line.startswith('функция '):
-                    func_name = line[8:].strip().split('(')[0]
-                    self.call_stack.append(f"функция {func_name} (строка {i+1})")
-                    if self.debug_callback:
-                        self.debug_callback("call_stack_updated", self.call_stack)
-                    
-                    end_pos = self.find_block_end(lines, i, 'функция')
-                    i = end_pos
-                    self.call_stack.pop()
+                    i = self.handle_function_declaration(lines, i)
+                    continue
                     
                 elif line.startswith('список '):
                     self.handle_list_declaration(line[6:].strip())
@@ -203,35 +202,23 @@ class RiCompiler:
                 elif line == 'иначе':
                     pass
                     
-                else:
-                    # Исправление 1: Обработка вызовов функций без присваивания
-                    if '(' in line and ')' in line and not line.startswith('//'):
-                        # Если есть присваивание, например: перем x = случайно(1, 100)
-                        if '=' in line:
-                            parts = line.split('=', 1)
-                            if len(parts) == 2:
-                                var_name = parts[0].strip()
-                                expr = parts[1].strip()
-                                if '(' in expr and ')' in expr:
-                                    # Это вызов функции
-                                    result = self.evaluate_expression(expr)
-                                    self.variables[var_name] = result
-                                else:
-                                    # Обычное выражение
-                                    value = self.evaluate_expression(expr)
-                                    self.variables[var_name] = value
-                        else:
-                            # Просто вызов функции без присваивания
-                            self.evaluate_expression(line)
+                elif line.startswith('возврат '):
+                    expr = line[7:].strip()
+                    return self.evaluate_expression(expr)
                     
-                    elif '=' in line:
+                else:
+                    # Обработка присваиваний и вызовов функций
+                    if '=' in line:
                         parts = line.split('=', 1)
                         if len(parts) == 2:
                             var_name = parts[0].strip()
                             expr = parts[1].strip()
                             value = self.evaluate_expression(expr)
                             self.variables[var_name] = value
-                            
+                    else:
+                        # Просто выражение (может быть вызов функции)
+                        self.evaluate_expression(line)
+                    
             except Exception as e:
                 error_msg = f"Ошибка в строке {i+1}: {str(e)}"
                 self.output_lines.append(error_msg)
@@ -259,16 +246,112 @@ class RiCompiler:
         return False
     
     def find_block_end(self, lines, start_idx, block_type):
-        depth = 0
-        for j in range(start_idx, len(lines)):
+        depth = 1
+        for j in range(start_idx + 1, len(lines)):
             line = lines[j].strip()
-            if line.startswith(block_type) or line.startswith('если ') or line.startswith('цикл '):
+            if not line or line.startswith('//'):
+                continue
+                
+            if line.startswith(block_type) or line.startswith('если ') or line.startswith('цикл ') or line.startswith('функция '):
                 depth += 1
             elif line == 'конец':
                 depth -= 1
                 if depth == 0:
                     return j
         return len(lines) - 1
+    
+    def handle_function_declaration(self, lines, start_idx):
+        line = lines[start_idx].strip()
+        func_match = re.match(r'функция\s+(\w+)\s*\((.*?)\)', line)
+        if not func_match:
+            return start_idx + 1
+            
+        func_name = func_match.group(1)
+        params_str = func_match.group(2).strip()
+        params = [p.strip() for p in params_str.split(',')] if params_str else []
+        
+        # Находим конец функции
+        end_idx = self.find_block_end(lines, start_idx, 'функция')
+        
+        # Сохраняем тело функции
+        body_lines = lines[start_idx + 1:end_idx]
+        self.user_functions[func_name] = {
+            'params': params,
+            'body': body_lines,
+            'start_line': start_idx + 2  # +2 потому что +1 для индексации и +1 для пропуска строки объявления
+        }
+        
+        return end_idx
+    
+    def call_user_function(self, func_name, args):
+        if func_name not in self.user_functions:
+            return None
+            
+        func = self.user_functions[func_name]
+        
+        # Сохраняем текущие переменные
+        saved_vars = self.variables.copy()
+        saved_call_stack = self.call_stack.copy()
+        
+        # Добавляем параметры в переменные
+        for i, param in enumerate(func['params']):
+            if i < len(args):
+                self.variables[param] = args[i]
+            else:
+                self.variables[param] = 0
+        
+        # Добавляем в стек вызовов
+        self.call_stack.append(f"функция {func_name}")
+        
+        # Выполняем тело функции
+        result = None
+        lines = func['body']
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            if not line or line.startswith('//'):
+                i += 1
+                continue
+                
+            if '//' in line:
+                line = line.split('//')[0].strip()
+            
+            try:
+                if line.startswith('перем '):
+                    self.handle_var_declaration(line[5:].strip())
+                elif line.startswith('вывести '):
+                    self.handle_print(line[7:].strip())
+                elif line.startswith('если '):
+                    i = self.handle_if(lines, i, None, None)
+                    continue
+                elif line.startswith('цикл '):
+                    i = self.handle_while(lines, i, None, None)
+                    continue
+                elif line.startswith('возврат '):
+                    expr = line[7:].strip()
+                    result = self.evaluate_expression(expr)
+                    break
+                elif '=' in line:
+                    parts = line.split('=', 1)
+                    if len(parts) == 2:
+                        var_name = parts[0].strip()
+                        expr = parts[1].strip()
+                        value = self.evaluate_expression(expr)
+                        self.variables[var_name] = value
+                else:
+                    self.evaluate_expression(line)
+            except Exception as e:
+                self.output_lines.append(f"Ошибка в функции {func_name}: {str(e)}")
+            
+            i += 1
+        
+        # Восстанавливаем переменные и стек
+        self.variables = saved_vars
+        self.call_stack = saved_call_stack
+        
+        return result
     
     def handle_var_declaration(self, line):
         if '=' in line:
@@ -335,68 +418,71 @@ class RiCompiler:
     
     def handle_if(self, lines, start_idx, input_callback, event_callback):
         line = lines[start_idx].strip()
-        condition_part = line[3:].strip()
         
-        if ' то' in condition_part:
-            condition_expr = condition_part.split(' то')[0].strip()
-            condition = self.evaluate_expression(condition_expr)
+        # Извлекаем условие
+        if ' то' in line:
+            condition_part = line.split(' то')[0][3:].strip()  # Убираем "если "
+            condition_expr = condition_part
+        else:
+            condition_part = line[3:].strip()
+            condition_expr = condition_part
             
-            else_pos = -1
-            end_pos = -1
-            depth = 0
-            
-            # Исправление 2: Ищем конец блока
-            for j in range(start_idx, len(lines)):
-                check_line = lines[j].strip()
-                if check_line.startswith('//') or not check_line:
-                    continue
-                    
-                if check_line.startswith('если '):
-                    depth += 1
-                elif check_line == 'иначе' and depth == 1:  # Исправлено: depth == 1
-                    else_pos = j
-                elif check_line == 'конец':
-                    depth -= 1
-                    if depth == 0:
-                        end_pos = j
-                        break
-            
-            if end_pos == -1:
-                return start_idx + 1
-            
-            if condition:
-                # Выполняем блок от if до else или до конца
-                block_end = else_pos if else_pos != -1 else end_pos
-                k = start_idx + 1
-                while k < block_end:
+        condition = self.evaluate_expression(condition_expr)
+        
+        # Находим блок else и конец
+        else_pos = -1
+        end_pos = -1
+        depth = 1
+        
+        for j in range(start_idx + 1, len(lines)):
+            check_line = lines[j].strip()
+            if not check_line or check_line.startswith('//'):
+                continue
+                
+            if check_line.startswith('если ') or check_line.startswith('цикл ') or check_line.startswith('функция '):
+                depth += 1
+            elif check_line == 'иначе' and depth == 1:
+                else_pos = j
+            elif check_line == 'конец':
+                depth -= 1
+                if depth == 0:
+                    end_pos = j
+                    break
+        
+        if end_pos == -1:
+            return start_idx + 1
+        
+        if condition:
+            # Выполняем блок от if до else или до конца
+            block_end = else_pos if else_pos != -1 else end_pos
+            k = start_idx + 1
+            while k < block_end:
+                self.execute_single_line(lines[k].strip(), input_callback, event_callback)
+                k += 1
+        else:
+            # Выполняем блок else если есть
+            if else_pos != -1:
+                k = else_pos + 1
+                while k < end_pos:
                     self.execute_single_line(lines[k].strip(), input_callback, event_callback)
                     k += 1
-                return end_pos
-            else:
-                # Выполняем блок else если есть
-                if else_pos != -1:
-                    k = else_pos + 1
-                    while k < end_pos:
-                        self.execute_single_line(lines[k].strip(), input_callback, event_callback)
-                        k += 1
-                return end_pos
         
-        return start_idx + 1
+        return end_pos
     
     def handle_while(self, lines, start_idx, input_callback, event_callback):
         line = lines[start_idx].strip()
         condition_expr = line[4:].strip()
         
         end_pos = -1
-        depth = 0
+        depth = 1
         
         # Находим конец цикла
-        for j in range(start_idx, len(lines)):
+        for j in range(start_idx + 1, len(lines)):
             check_line = lines[j].strip()
-            if check_line.startswith('//') or not check_line:
+            if not check_line or check_line.startswith('//'):
                 continue
                 
-            if check_line.startswith('цикл '):
+            if check_line.startswith('цикл ') or check_line.startswith('если ') or check_line.startswith('функция '):
                 depth += 1
             elif check_line == 'конец':
                 depth -= 1
@@ -437,6 +523,9 @@ class RiCompiler:
         if not line or line.startswith('//'):
             return
             
+        if '//' in line:
+            line = line.split('//')[0].strip()
+        
         if line.startswith('перем '):
             self.handle_var_declaration(line[5:].strip())
         elif line.startswith('вывести '):
@@ -448,12 +537,18 @@ class RiCompiler:
                 try:
                     if '.' in user_input:
                         self.variables[var_name] = float(user_input)
-                    elif user_input.isdigit():
+                    elif user_input.isdigit() or (user_input.startswith('-') and user_input[1:].isdigit()):
                         self.variables[var_name] = int(user_input)
                     else:
                         self.variables[var_name] = user_input
                 except:
                     self.variables[var_name] = user_input
+        elif line.startswith('список '):
+            self.handle_list_declaration(line[6:].strip())
+        elif line.startswith('добавить '):
+            self.handle_list_append(line[8:].strip())
+        elif line.startswith('удалить '):
+            self.handle_list_remove(line[7:].strip())
         elif line.startswith('окно '):
             self.handle_window_command(line[4:].strip())
         elif line.startswith('прямоугольник '):
@@ -487,6 +582,9 @@ class RiCompiler:
             self.graphics_commands.append(command)
             if self.graphics_callback:
                 self.graphics_callback([command])
+        elif line.startswith('возврат '):
+            expr = line[7:].strip()
+            return self.evaluate_expression(expr)
         elif '=' in line:
             # Обработка присваиваний внутри блоков
             parts = line.split('=', 1)
@@ -495,6 +593,9 @@ class RiCompiler:
                 expr = parts[1].strip()
                 value = self.evaluate_expression(expr)
                 self.variables[var_name] = value
+        else:
+            # Просто выражение
+            self.evaluate_expression(line)
     
     def handle_window_command(self, params):
         parts = params.split()
@@ -605,17 +706,8 @@ class RiCompiler:
             'элемент': self.builtin_list_element,
         }
     
-    def call_builtin_function(self, line):
+    def call_builtin_function(self, func_name, args_str):
         try:
-            # Убираем возможное присваивание в начале
-            if '=' in line:
-                parts = line.split('=', 1)
-                if len(parts) == 2:
-                    line = parts[1].strip()
-            
-            func_name = line.split('(')[0].strip()
-            args_str = line.split('(')[1].split(')')[0].strip()
-            
             if func_name in self.builtin_functions:
                 args = []
                 if args_str:
@@ -626,7 +718,7 @@ class RiCompiler:
             return None
         except Exception as e:
             if self.debug_callback:
-                self.debug_callback("error", f"Ошибка вызова функции: {str(e)}")
+                self.debug_callback("error", f"Ошибка вызова функции {func_name}: {str(e)}")
             return None
     
     def builtin_random(self, min_val=0, max_val=1):
@@ -637,6 +729,8 @@ class RiCompiler:
             return len(value)
         elif value in self.lists:
             return len(self.lists[value])
+        elif isinstance(value, list):
+            return len(value)
         return 0
     
     def builtin_sqrt(self, value):
@@ -674,6 +768,8 @@ class RiCompiler:
             return "строка"
         elif isinstance(value, bool):
             return "булево"
+        elif isinstance(value, list):
+            return "список"
         return "неизвестно"
     
     def builtin_time(self):
@@ -693,43 +789,81 @@ class RiCompiler:
         try:
             expr = expr.strip()
             
-            # Обработка вызовов функций
+            # Обработка пустых выражений
+            if not expr:
+                return ""
+            
+            # Обработка строк
+            if (expr.startswith('"') and expr.endswith('"')) or (expr.startswith("'") and expr.endswith("'")):
+                return expr[1:-1]
+            
+            # Обработка булевых значений
+            if expr.lower() == 'истина':
+                return True
+            elif expr.lower() == 'ложь':
+                return False
+            
+            # Обработка вызовов функций (включая пользовательские)
             if '(' in expr and ')' in expr:
-                func_name = expr.split('(')[0].strip()
-                if func_name in self.builtin_functions:
-                    return self.call_builtin_function(expr)
+                # Извлекаем имя функции и аргументы
+                match = re.match(r'(\w+)\s*\((.*)\)', expr)
+                if match:
+                    func_name = match.group(1)
+                    args_str = match.group(2)
+                    
+                    # Проверяем встроенные функции
+                    if func_name in self.builtin_functions:
+                        return self.call_builtin_function(func_name, args_str)
+                    
+                    # Проверяем пользовательские функции
+                    if func_name in self.user_functions:
+                        args = []
+                        if args_str:
+                            for arg in args_str.split(','):
+                                args.append(self.evaluate_expression(arg.strip()))
+                        return self.call_user_function(func_name, args)
             
             # Обработка доступа к элементам списка
             if '[' in expr and ']' in expr:
-                list_name = expr.split('[')[0].strip()
-                index_expr = expr.split('[')[1].split(']')[0].strip()
+                parts = expr.split('[')
+                list_name = parts[0].strip()
+                index_expr = parts[1].split(']')[0].strip()
                 
                 if list_name in self.lists:
                     index = self.evaluate_expression(index_expr)
-                    if 0 <= index < len(self.lists[list_name]):
-                        return self.lists[list_name][index]
+                    if isinstance(index, (int, float)):
+                        index = int(index)
+                        if 0 <= index < len(self.lists[list_name]):
+                            return self.lists[list_name][index]
                     return 0
             
+            # Обработка унарного минуса
+            if expr.startswith('-'):
+                inner = expr[1:].strip()
+                if inner:
+                    return -self.evaluate_expression(inner)
+            
             # Обработка вложенных скобок
-            if '(' in expr and ')' in expr:
-                while '(' in expr and ')' in expr:
-                    start = expr.rfind('(')
-                    end = expr.find(')', start)
-                    if start != -1 and end != -1:
-                        inner = expr[start+1:end]
-                        inner_result = self.evaluate_expression(inner)
-                        expr = expr[:start] + str(inner_result) + expr[end+1:]
+            while '(' in expr and ')' in expr:
+                start = expr.rfind('(')
+                end = expr.find(')', start)
+                if start != -1 and end != -1:
+                    inner = expr[start+1:end]
+                    inner_result = self.evaluate_expression(inner)
+                    expr = expr[:start] + str(inner_result) + expr[end+1:]
+                else:
+                    break
             
             # Логические операторы
-            if ' не ' in expr or expr.startswith('не '):
-                if ' не ' in expr:
-                    parts = expr.split(' не ')
-                    if len(parts) == 2:
-                        value = self.evaluate_expression(parts[1].strip())
-                        return not self._to_bool(value)
-                elif expr.startswith('не '):
-                    value = self.evaluate_expression(expr[3:].strip())
+            if ' не ' in expr:
+                parts = expr.split(' не ')
+                if len(parts) == 2:
+                    value = self.evaluate_expression(parts[1].strip())
                     return not self._to_bool(value)
+            
+            if expr.startswith('не '):
+                value = self.evaluate_expression(expr[3:].strip())
+                return not self._to_bool(value)
             
             if ' и ' in expr:
                 parts = expr.split(' и ')
@@ -760,6 +894,10 @@ class RiCompiler:
                         left = self._evaluate_simple(parts[0].strip())
                         right = self._evaluate_simple(parts[1].strip())
                         
+                        if isinstance(left, str) or isinstance(right, str):
+                            left = str(left)
+                            right = str(right)
+                        
                         if op == '>':
                             return left > right
                         elif op == '<':
@@ -773,7 +911,58 @@ class RiCompiler:
                         elif op == '!=':
                             return left != right
             
-            # Арифметические операторы
+            # Арифметические операторы (с учетом приоритета)
+            # Сначала умножение и деление
+            expr_parts = []
+            current = ''
+            i = 0
+            while i < len(expr):
+                if expr[i:i+2] in ('**', '//'):
+                    if current:
+                        expr_parts.append(current.strip())
+                    expr_parts.append(expr[i:i+2])
+                    current = ''
+                    i += 2
+                elif expr[i] in ('*', '/', '%'):
+                    if current:
+                        expr_parts.append(current.strip())
+                    expr_parts.append(expr[i])
+                    current = ''
+                    i += 1
+                else:
+                    current += expr[i]
+                    i += 1
+            if current:
+                expr_parts.append(current.strip())
+            
+            # Если есть умножение/деление, обрабатываем их
+            if len(expr_parts) > 1:
+                # Объединяем последовательные операнды
+                result = None
+                op = None
+                for part in expr_parts:
+                    if part in ('*', '/', '%', '**', '//'):
+                        op = part
+                    else:
+                        value = self._evaluate_simple(part)
+                        if result is None:
+                            result = value
+                        elif op == '*':
+                            result *= value
+                        elif op == '/':
+                            if value != 0:
+                                result /= value
+                            else:
+                                result = 0
+                        elif op == '%':
+                            result %= value
+                        elif op == '**':
+                            result **= value
+                        elif op == '//':
+                            result //= value
+                expr = str(result)
+            
+            # Затем сложение и вычитание
             if '+' in expr:
                 parts = expr.split('+')
                 result = self._evaluate_simple(parts[0].strip())
@@ -781,26 +970,20 @@ class RiCompiler:
                     result += self._evaluate_simple(part.strip())
                 return result
             
-            if '-' in expr:
+            if '-' in expr and expr.count('-') > (1 if expr.startswith('-') else 0):
                 parts = expr.split('-')
-                if len(parts) == 2 and not expr.startswith('-'):
-                    return self._evaluate_simple(parts[0].strip()) - self._evaluate_simple(parts[1].strip())
+                if expr.startswith('-'):
+                    result = -self._evaluate_simple(parts[1].strip())
+                    for part in parts[2:]:
+                        result -= self._evaluate_simple(part.strip())
+                    return result
+                else:
+                    result = self._evaluate_simple(parts[0].strip())
+                    for part in parts[1:]:
+                        result -= self._evaluate_simple(part.strip())
+                    return result
             
-            if '*' in expr:
-                parts = expr.split('*')
-                result = self._evaluate_simple(parts[0].strip())
-                for part in parts[1:]:
-                    result *= self._evaluate_simple(part.strip())
-                return result
-            
-            if '/' in expr:
-                parts = expr.split('/')
-                if len(parts) == 2:
-                    denominator = self._evaluate_simple(parts[1].strip())
-                    if denominator != 0:
-                        return self._evaluate_simple(parts[0].strip()) / denominator
-                    return 0
-            
+            # Возведение в степень
             if '^' in expr:
                 parts = expr.split('^')
                 if len(parts) == 2:
@@ -818,18 +1001,23 @@ class RiCompiler:
     def _evaluate_simple(self, expr: str):
         expr = expr.strip()
         
-        # Строки
+        if not expr:
+            return 0
+        
+        # Строки (если еще не обработаны)
         if expr.startswith('"') and expr.endswith('"'):
             return expr[1:-1]
         
         if expr.startswith("'") and expr.endswith("'"):
             return expr[1:-1]
         
-        # Списки
-        if expr.startswith('[') and expr.endswith(']'):
-            return expr
+        # Булевы значения
+        if expr.lower() == 'истина':
+            return True
+        elif expr.lower() == 'ложь':
+            return False
         
-        # Числа
+        # Числа (включая отрицательные)
         try:
             if '.' in expr:
                 return float(expr)
@@ -842,26 +1030,31 @@ class RiCompiler:
         if expr in self.variables:
             return self.variables[expr]
         
-        # Списки
+        # Списки (как объекты)
         if expr in self.lists:
             return f"список[{len(self.lists[expr])} элементов]"
         
-        # Булевы значения
-        if expr.lower() == 'истина':
-            return True
-        elif expr.lower() == 'ложь':
-            return False
-        
         # Специальные переменные
-        if expr == 'мышь_х':
-            return self.last_mouse_x
-        elif expr == 'мышь_у':
-            return self.last_mouse_y
-        elif expr == 'мышь_нажата':
-            return self.last_mouse_pressed
+        special_vars = {
+            'мышь_х': self.last_mouse_x,
+            'мышь_у': self.last_mouse_y,
+            'мышь_нажата': self.last_mouse_pressed
+        }
+        if expr in special_vars:
+            return special_vars[expr]
         
-        # Если ничего не подошло, возвращаем 0
-        return 0
+        # Если ничего не подошло, возвращаем как строку или 0
+        try:
+            # Пробуем как число снова
+            if expr.replace('.', '', 1).replace('-', '', 1).isdigit():
+                if '.' in expr:
+                    return float(expr)
+                return int(expr)
+        except:
+            pass
+        
+        # Возвращаем как строку (может быть именем необъявленной переменной)
+        return expr
     
     def _to_bool(self, value):
         if isinstance(value, bool):
