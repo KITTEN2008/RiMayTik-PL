@@ -157,7 +157,13 @@ class RiCompiler:
                     
                 elif line.startswith('задержка '):
                     self.handle_delay_command(line[8:].strip())
-                    
+else:
+    if '(' in line and ')' in line and not line.startswith('//'):
+        result = self.call_builtin_function(line)
+        if result is not None and '=' in line:
+            var_name = line.split('=')[0].strip()
+            self.variables[var_name] = result
+                
                 elif line.startswith('очистить '):
                     self.handle_clear_command(line[8:].strip())
                     
