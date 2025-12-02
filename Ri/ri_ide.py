@@ -2,7 +2,7 @@
 # Создано программистом KITTEN в 2025 году
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog, Canvas
+from tkinter import ttk, scrolledtext, messagebox, filedialog, Canvas, simpledialog
 import threading
 import queue
 import re
@@ -10,6 +10,7 @@ import time
 import os
 import subprocess
 import json
+import traceback
 
 try:
     from ri_compiler import run_ri_code, RI_LANGUAGE_VERSION, RI_LANGUAGE_CREATOR, RI_LANGUAGE_YEAR
@@ -17,8 +18,8 @@ except ImportError:
     import ri_compiler
     run_ri_code = ri_compiler.run_ri_code
     RI_LANGUAGE_VERSION = ri_compiler.RI_LANGUAGE_VERSION
-    RI_LANGUAGE_CREATOR = "KITTEN"
-    RI_LANGUAGE_YEAR = "2025"
+    RI_LANGUAGE_CREATOR = ri_compiler.RI_LANGUAGE_CREATOR
+    RI_LANGUAGE_YEAR = ri_compiler.RI_LANGUAGE_YEAR
 
 class LineNumbers(tk.Canvas):
     def __init__(self, parent, text_widget, **kwargs):
@@ -43,30 +44,38 @@ class LineNumbers(tk.Canvas):
         self.current_execution_line = None
         
     def _redraw(self, event=None):
-        self.delete("all")
-        
         try:
-            first_line = self.text_widget.index('@0,0').split('.')[0]
-            last_line = self.text_widget.index('@0,%d' % self.text_widget.winfo_height()).split('.')[0]
+            self.delete("all")
             
-            first_line = max(1, int(first_line) - 1)
-            last_line = min(int(last_line) + 1, int(self.text_widget.index('end-1c').split('.')[0]))
+            # Получаем видимые строки
+            text_widget = self.text_widget
+            first_visible = text_widget.index('@0,0')
+            last_visible = text_widget.index(f'@0,{text_widget.winfo_height()}')
+            
+            first_line = int(first_visible.split('.')[0])
+            last_line = int(last_visible.split('.')[0])
+            
+            # Добавляем небольшой запас
+            first_line = max(1, first_line - 1)
+            last_line = min(int(text_widget.index('end-1c').split('.')[0]), last_line + 2)
             
             for line_num in range(first_line, last_line + 1):
-                bbox = self.text_widget.bbox(f'{line_num}.0')
+                bbox = text_widget.bbox(f'{line_num}.0')
                 if bbox:
-                    y = bbox[1]
+                    x, y, _, line_height = bbox
                     
+                    # Подсветка текущей строки выполнения
                     if self.current_execution_line == line_num:
                         self.create_rectangle(
-                            0, y - 2, 60, y + 18,
+                            0, y, self.winfo_width(), y + line_height,
                             fill='#264f78',
                             outline='',
                             tags=f'current_line_{line_num}'
                         )
                     
+                    # Номер строки
                     self.create_text(
-                        40, y,
+                        self.winfo_width() - 10, y,
                         text=str(line_num),
                         anchor='ne',
                         fill='#858585',
@@ -74,20 +83,23 @@ class LineNumbers(tk.Canvas):
                         tags=f'line_{line_num}'
                     )
                     
+                    # Точки останова
                     if line_num in self.breakpoints:
                         self.create_oval(
-                            10, y - 5, 20, y + 5,
+                            10, y + 2, 20, y + line_height - 2,
                             fill='#ff5555',
                             outline='#ff5555',
                             tags=f'breakpoint_{line_num}'
                         )
-        except:
+        except Exception as e:
+            # Игнорируем ошибки отрисовки
             pass
         
         self.config(scrollregion=self.bbox('all'))
     
     def _toggle_breakpoint(self, event):
         try:
+            # Находим строку по координатам Y
             line_num = int(self.text_widget.index(f'@0,{event.y}').split('.')[0])
             
             if line_num in self.breakpoints:
@@ -108,6 +120,10 @@ class LineNumbers(tk.Canvas):
     
     def clear_execution_line(self):
         self.current_execution_line = None
+        self._redraw()
+    
+    def clear_all_breakpoints(self):
+        self.breakpoints.clear()
         self._redraw()
 
 class Autocomplete:
@@ -206,7 +222,8 @@ class Autocomplete:
                 bg='#2d2d2d',
                 fg='white',
                 selectbackground='#264f78',
-                relief=tk.FLAT
+                relief=tk.FLAT,
+                highlightthickness=0
             )
             listbox.pack()
             
@@ -220,7 +237,10 @@ class Autocomplete:
     
     def _close_autocomplete(self):
         if self.autocomplete_window:
-            self.autocomplete_window.destroy()
+            try:
+                self.autocomplete_window.destroy()
+            except:
+                pass
             self.autocomplete_window = None
     
     def _on_tab(self, event):
@@ -229,19 +249,23 @@ class Autocomplete:
             return 'break'
     
     def _on_down(self, event):
-        if self.autocomplete_window:
-            current = self.autocomplete_listbox.curselection()[0]
-            if current < len(self.suggestions) - 1:
-                self.autocomplete_listbox.select_clear(current)
-                self.autocomplete_listbox.select_set(current + 1)
+        if self.autocomplete_window and self.autocomplete_listbox.size() > 0:
+            current = self.autocomplete_listbox.curselection()
+            if current:
+                current = current[0]
+                if current < len(self.suggestions) - 1:
+                    self.autocomplete_listbox.select_clear(current)
+                    self.autocomplete_listbox.select_set(current + 1)
             return 'break'
     
     def _on_up(self, event):
-        if self.autocomplete_window:
-            current = self.autocomplete_listbox.curselection()[0]
-            if current > 0:
-                self.autocomplete_listbox.select_clear(current)
-                self.autocomplete_listbox.select_set(current - 1)
+        if self.autocomplete_window and self.autocomplete_listbox.size() > 0:
+            current = self.autocomplete_listbox.curselection()
+            if current:
+                current = current[0]
+                if current > 0:
+                    self.autocomplete_listbox.select_clear(current)
+                    self.autocomplete_listbox.select_set(current - 1)
             return 'break'
     
     def _on_return(self, event):
@@ -253,7 +277,7 @@ class Autocomplete:
         self._close_autocomplete()
     
     def _insert_suggestion(self):
-        if not self.autocomplete_window:
+        if not self.autocomplete_window or not self.autocomplete_listbox:
             return
         
         selection = self.autocomplete_listbox.curselection()
@@ -286,25 +310,29 @@ class GitIntegration:
                 ['git', 'init'],
                 cwd=self.project_path,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             return result.returncode == 0
         except Exception as e:
+            print(f"Git init error: {e}")
             return False
     
     def commit_changes(self, message):
         try:
             subprocess.run(['git', 'add', '.'], cwd=self.project_path, 
-                         capture_output=True)
+                         capture_output=True, timeout=10)
             
             result = subprocess.run(
                 ['git', 'commit', '-m', message],
                 cwd=self.project_path,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             return result.returncode == 0
         except Exception as e:
+            print(f"Git commit error: {e}")
             return False
     
     def get_status(self):
@@ -313,12 +341,14 @@ class GitIntegration:
                 ['git', 'status', '--porcelain'],
                 cwd=self.project_path,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             if result.stdout:
                 return [line for line in result.stdout.strip().split('\n') if line]
             return []
         except Exception as e:
+            print(f"Git status error: {e}")
             return []
     
     def get_branches(self):
@@ -327,7 +357,8 @@ class GitIntegration:
                 ['git', 'branch'],
                 cwd=self.project_path,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             branches = []
             current_branch = None
@@ -340,6 +371,7 @@ class GitIntegration:
                         branches.append(line.strip())
             return branches, current_branch
         except Exception as e:
+            print(f"Git branches error: {e}")
             return [], None
     
     def get_history(self, limit=20):
@@ -348,12 +380,14 @@ class GitIntegration:
                 ['git', 'log', f'--oneline', f'-{limit}'],
                 cwd=self.project_path,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             if result.stdout:
                 return [line for line in result.stdout.strip().split('\n') if line]
             return []
         except Exception as e:
+            print(f"Git history error: {e}")
             return []
     
     def create_branch(self, name):
@@ -362,10 +396,12 @@ class GitIntegration:
                 ['git', 'branch', name],
                 cwd=self.project_path,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             return result.returncode == 0
         except Exception as e:
+            print(f"Git create branch error: {e}")
             return False
     
     def checkout_branch(self, name):
@@ -374,10 +410,12 @@ class GitIntegration:
                 ['git', 'checkout', name],
                 cwd=self.project_path,
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             return result.returncode == 0
         except Exception as e:
+            print(f"Git checkout error: {e}")
             return False
 
 class GraphicsWindow:
@@ -422,45 +460,66 @@ class GraphicsWindow:
         self.mouse_x = event.x
         self.mouse_y = event.y
         if self.ide:
-            self.ide.event_queue.put(("mouse_move", self.mouse_x, self.mouse_y))
+            try:
+                self.ide.event_queue.put(("mouse_move", self.mouse_x, self.mouse_y))
+            except:
+                pass
     
     def on_mouse_press(self, event):
         self.mouse_pressed = True
         self.mouse_x = event.x
         self.mouse_y = event.y
         if self.ide:
-            self.ide.event_queue.put(("mouse_press", "левая", self.mouse_x, self.mouse_y))
+            try:
+                self.ide.event_queue.put(("mouse_press", "левая", self.mouse_x, self.mouse_y))
+            except:
+                pass
     
     def on_mouse_release(self, event):
         self.mouse_pressed = False
         self.mouse_x = event.x
         self.mouse_y = event.y
         if self.ide:
-            self.ide.event_queue.put(("mouse_release", "левая", self.mouse_x, self.mouse_y))
+            try:
+                self.ide.event_queue.put(("mouse_release", "левая", self.mouse_x, self.mouse_y))
+            except:
+                pass
     
     def on_mouse_press_middle(self, event):
         self.mouse_x = event.x
         self.mouse_y = event.y
         if self.ide:
-            self.ide.event_queue.put(("mouse_press", "средняя", self.mouse_x, self.mouse_y))
+            try:
+                self.ide.event_queue.put(("mouse_press", "средняя", self.mouse_x, self.mouse_y))
+            except:
+                pass
     
     def on_mouse_release_middle(self, event):
         self.mouse_x = event.x
         self.mouse_y = event.y
         if self.ide:
-            self.ide.event_queue.put(("mouse_release", "средняя", self.mouse_x, self.mouse_y))
+            try:
+                self.ide.event_queue.put(("mouse_release", "средняя", self.mouse_x, self.mouse_y))
+            except:
+                pass
     
     def on_mouse_press_right(self, event):
         self.mouse_x = event.x
         self.mouse_y = event.y
         if self.ide:
-            self.ide.event_queue.put(("mouse_press", "правая", self.mouse_x, self.mouse_y))
+            try:
+                self.ide.event_queue.put(("mouse_press", "правая", self.mouse_x, self.mouse_y))
+            except:
+                pass
     
     def on_mouse_release_right(self, event):
         self.mouse_x = event.x
         self.mouse_y = event.y
         if self.ide:
-            self.ide.event_queue.put(("mouse_release", "правая", self.mouse_x, self.mouse_y))
+            try:
+                self.ide.event_queue.put(("mouse_release", "правая", self.mouse_x, self.mouse_y))
+            except:
+                pass
     
     def on_key_press(self, event):
         key = self.translate_key(event.keysym)
@@ -468,7 +527,10 @@ class GraphicsWindow:
         self.last_key = key
         
         if self.ide:
-            self.ide.event_queue.put(("key_press", key))
+            try:
+                self.ide.event_queue.put(("key_press", key))
+            except:
+                pass
     
     def on_key_release(self, event):
         key = self.translate_key(event.keysym)
@@ -476,12 +538,18 @@ class GraphicsWindow:
             self.keys_pressed.remove(key)
         
         if self.ide:
-            self.ide.event_queue.put(("key_release", key))
+            try:
+                self.ide.event_queue.put(("key_release", key))
+            except:
+                pass
     
     def on_mouse_wheel(self, event):
         direction = "вверх" if event.delta > 0 else "вниз"
         if self.ide:
-            self.ide.event_queue.put(("mouse_wheel", direction, self.mouse_x, self.mouse_y))
+            try:
+                self.ide.event_queue.put(("mouse_wheel", direction, self.mouse_x, self.mouse_y))
+            except:
+                pass
     
     def translate_key(self, keysym):
         translations = {
@@ -545,61 +613,85 @@ class GraphicsWindow:
     
     def close(self):
         self.is_open = False
-        self.window.destroy()
+        try:
+            self.window.destroy()
+        except:
+            pass
     
     def clear(self, color="white"):
         self.canvas.delete("all")
-        self.canvas.config(bg=self._translate_color(color))
+        try:
+            self.canvas.config(bg=self._translate_color(color))
+        except:
+            self.canvas.config(bg="white")
         self.objects.clear()
     
     def draw_rectangle(self, x, y, width, height, color="black"):
-        fill_color = self._translate_color(color)
-        outline_color = "black" if fill_color != "black" else "white"
-        obj = self.canvas.create_rectangle(
-            x, y, x + width, y + height,
-            fill=fill_color,
-            outline=outline_color,
-            width=2
-        )
-        self.objects.append(obj)
-        return obj
+        try:
+            fill_color = self._translate_color(color)
+            outline_color = "black" if fill_color != "black" else "white"
+            obj = self.canvas.create_rectangle(
+                x, y, x + width, y + height,
+                fill=fill_color,
+                outline=outline_color,
+                width=2
+            )
+            self.objects.append(obj)
+            return obj
+        except:
+            return None
     
     def draw_circle(self, x, y, radius, color="black"):
-        fill_color = self._translate_color(color)
-        outline_color = "black" if fill_color != "black" else "white"
-        obj = self.canvas.create_oval(
-            x - radius, y - radius,
-            x + radius, y + radius,
-            fill=fill_color,
-            outline=outline_color,
-            width=2
-        )
-        self.objects.append(obj)
-        return obj
+        try:
+            fill_color = self._translate_color(color)
+            outline_color = "black" if fill_color != "black" else "white"
+            obj = self.canvas.create_oval(
+                x - radius, y - radius,
+                x + radius, y + radius,
+                fill=fill_color,
+                outline=outline_color,
+                width=2
+            )
+            self.objects.append(obj)
+            return obj
+        except:
+            return None
     
     def draw_line(self, x1, y1, x2, y2, color="black"):
-        obj = self.canvas.create_line(
-            x1, y1, x2, y2,
-            fill=self._translate_color(color),
-            width=2
-        )
-        self.objects.append(obj)
-        return obj
+        try:
+            obj = self.canvas.create_line(
+                x1, y1, x2, y2,
+                fill=self._translate_color(color),
+                width=2
+            )
+            self.objects.append(obj)
+            return obj
+        except:
+            return None
     
     def draw_text(self, x, y, text, color="black"):
-        obj = self.canvas.create_text(
-            x, y,
-            text=text,
-            fill=self._translate_color(color),
-            font=("Arial", 14)
-        )
-        self.objects.append(obj)
-        return obj
+        try:
+            obj = self.canvas.create_text(
+                x, y,
+                text=text,
+                fill=self._translate_color(color),
+                font=("Arial", 14)
+            )
+            self.objects.append(obj)
+            return obj
+        except:
+            return None
     
     def update_screen(self):
-        self.window.update()
+        try:
+            self.window.update()
+        except:
+            pass
     
     def _translate_color(self, color_name):
+        if not color_name:
+            return "white"
+            
         colors = {
             "черный": "black",
             "белый": "white",
@@ -621,6 +713,8 @@ class GraphicsWindow:
             "темно-зеленый": "darkgreen",
             "светло-зеленый": "lightgreen",
             "светло-розовый": "lightpink",
+            "темно-серый": "darkgray",
+            "светло-серый": "lightgray",
         }
         return colors.get(color_name.lower(), color_name)
 
@@ -655,6 +749,7 @@ class RiIDE:
         self.current_debug_line = 0
         self.breakpoints = set()
         self.call_stack = []
+        self.compiler_instance = None
         
         self.git_integration = None
         self.current_project_path = None
@@ -886,6 +981,9 @@ class RiIDE:
         self.variables_tree.heading('#0', text='Имя')
         self.variables_tree.heading('value', text='Значение')
         self.variables_tree.heading('type', text='Тип')
+        self.variables_tree.column('#0', width=120)
+        self.variables_tree.column('value', width=100)
+        self.variables_tree.column('type', width=80)
         
         scrollbar = ttk.Scrollbar(variables_frame, orient="vertical", command=self.variables_tree.yview)
         self.variables_tree.configure(yscrollcommand=scrollbar.set)
@@ -1025,92 +1123,103 @@ class RiIDE:
         self.code_editor.tag_configure("list", foreground="#9CDCFE")
         
     def highlight_syntax(self, event=None):
-        cursor_pos = self.code_editor.index(tk.INSERT)
-        code = self.code_editor.get("1.0", tk.END)
-        
-        for tag in ["keyword", "comment", "string", "number", "operator", 
-                   "graphics", "events", "function", "list"]:
-            self.code_editor.tag_remove(tag, "1.0", tk.END)
-        
-        if not code:
-            return
-        
-        lines = code.split('\n')
-        pos = 0
-        
-        for line in lines:
-            if '//' in line:
-                comment_start = line.find('//')
-                start = f"1.{pos + comment_start}"
-                end = f"1.{pos + len(line)}"
-                self.code_editor.tag_add("comment", start, end)
+        try:
+            cursor_pos = self.code_editor.index(tk.INSERT)
+            code = self.code_editor.get("1.0", tk.END)
             
-            for match in re.finditer(r'"[^"]*"', line):
-                start = f"1.{pos + match.start()}"
-                end = f"1.{pos + match.end()}"
-                self.code_editor.tag_add("string", start, end)
+            for tag in ["keyword", "comment", "string", "number", "operator", 
+                       "graphics", "events", "function", "list"]:
+                self.code_editor.tag_remove(tag, "1.0", tk.END)
             
-            keywords = ['перем', 'если', 'иначе', 'цикл', 'конец', 'то', 
-                       'функция', 'вызвать', 'вывести', 'ввести', 'возврат',
-                       'и', 'или', 'не', 'истина', 'ложь']
-            for keyword in keywords:
-                pattern = r'\b' + re.escape(keyword) + r'\b'
-                for match in re.finditer(pattern, line, re.IGNORECASE):
-                    start = f"1.{pos + match.start()}"
-                    end = f"1.{pos + match.end()}"
-                    self.code_editor.tag_add("keyword", start, end)
+            if not code or code.strip() == '':
+                return
             
-            graphics_cmds = ['окно', 'прямоугольник', 'круг', 'линия', 
-                           'текст', 'задержка', 'очистить', 'обновить_экран', 'остановить']
-            for cmd in graphics_cmds:
-                pattern = r'\b' + re.escape(cmd) + r'\b'
-                for match in re.finditer(pattern, line, re.IGNORECASE):
-                    start = f"1.{pos + match.start()}"
-                    end = f"1.{pos + match.end()}"
-                    self.code_editor.tag_add("graphics", start, end)
+            lines = code.split('\n')
+            line_offset = 0
             
-            event_cmds = ['установить_обработчик', 'мышь_х', 'мышь_у', 
-                         'мышь_нажата', 'клавиша_нажата']
-            for cmd in event_cmds:
-                pattern = r'\b' + re.escape(cmd) + r'\b'
-                for match in re.finditer(pattern, line, re.IGNORECASE):
-                    start = f"1.{pos + match.start()}"
-                    end = f"1.{pos + match.end()}"
-                    self.code_editor.tag_add("events", start, end)
+            for line_num, line in enumerate(lines, 1):
+                if '//' in line:
+                    comment_start = line.find('//')
+                    start = f"{line_num}.{comment_start}"
+                    end = f"{line_num}.{len(line)}"
+                    self.code_editor.tag_add("comment", start, end)
+                
+                # Строки в двойных кавычках
+                for match in re.finditer(r'"[^"]*"', line):
+                    start = f"{line_num}.{match.start()}"
+                    end = f"{line_num}.{match.end()}"
+                    self.code_editor.tag_add("string", start, end)
+                
+                # Строки в одинарных кавычках
+                for match in re.finditer(r"'[^']*'", line):
+                    start = f"{line_num}.{match.start()}"
+                    end = f"{line_num}.{match.end()}"
+                    self.code_editor.tag_add("string", start, end)
+                
+                keywords = ['перем', 'если', 'иначе', 'цикл', 'конец', 'то', 
+                           'функция', 'вызвать', 'вывести', 'ввести', 'возврат',
+                           'и', 'или', 'не', 'истина', 'ложь']
+                for keyword in keywords:
+                    pattern = r'\b' + re.escape(keyword) + r'\b'
+                    for match in re.finditer(pattern, line, re.IGNORECASE):
+                        start = f"{line_num}.{match.start()}"
+                        end = f"{line_num}.{match.end()}"
+                        self.code_editor.tag_add("keyword", start, end)
+                
+                graphics_cmds = ['окно', 'прямоугольник', 'круг', 'линия', 
+                               'текст', 'задержка', 'очистить', 'обновить_экран', 'остановить']
+                for cmd in graphics_cmds:
+                    pattern = r'\b' + re.escape(cmd) + r'\b'
+                    for match in re.finditer(pattern, line, re.IGNORECASE):
+                        start = f"{line_num}.{match.start()}"
+                        end = f"{line_num}.{match.end()}"
+                        self.code_editor.tag_add("graphics", start, end)
+                
+                event_cmds = ['установить_обработчик', 'мышь_х', 'мышь_у', 
+                             'мышь_нажата', 'клавиша_нажата']
+                for cmd in event_cmds:
+                    pattern = r'\b' + re.escape(cmd) + r'\b'
+                    for match in re.finditer(pattern, line, re.IGNORECASE):
+                        start = f"{line_num}.{match.start()}"
+                        end = f"{line_num}.{match.end()}"
+                        self.code_editor.tag_add("events", start, end)
+                
+                builtin_funcs = ['случайно', 'длина', 'корень', 'синус', 'косинус',
+                               'округлить', 'строка', 'число', 'тип', 'время',
+                               'список_длина', 'элемент']
+                for func in builtin_funcs:
+                    pattern = r'\b' + re.escape(func) + r'\b'
+                    for match in re.finditer(pattern, line, re.IGNORECASE):
+                        start = f"{line_num}.{match.start()}"
+                        end = f"{line_num}.{match.end()}"
+                        self.code_editor.tag_add("function", start, end)
+                
+                list_cmds = ['список', 'добавить', 'удалить']
+                for cmd in list_cmds:
+                    pattern = r'\b' + re.escape(cmd) + r'\b'
+                    for match in re.finditer(pattern, line, re.IGNORECASE):
+                        start = f"{line_num}.{match.start()}"
+                        end = f"{line_num}.{match.end()}"
+                        self.code_editor.tag_add("list", start, end)
+                
+                # Числа (включая отрицательные и десятичные)
+                for match in re.finditer(r'-?\b\d+(\.\d+)?\b', line):
+                    start = f"{line_num}.{match.start()}"
+                    end = f"{line_num}.{match.end()}"
+                    self.code_editor.tag_add("number", start, end)
+                
+                operators = ['\+', '-', '\*', '/', '=', '>', '<', '>=', '<=', '==', '!=', '\^', '%']
+                for op in operators:
+                    for match in re.finditer(op, line):
+                        start = f"{line_num}.{match.start()}"
+                        end = f"{line_num}.{match.end()}"
+                        self.code_editor.tag_add("operator", start, end)
+                
+                line_offset += len(line) + 1
             
-            builtin_funcs = ['случайно', 'длина', 'корень', 'синус', 'косинус',
-                           'округлить', 'строка', 'число', 'тип', 'время',
-                           'список_длина', 'элемент']
-            for func in builtin_funcs:
-                pattern = r'\b' + re.escape(func) + r'\b'
-                for match in re.finditer(pattern, line, re.IGNORECASE):
-                    start = f"1.{pos + match.start()}"
-                    end = f"1.{pos + match.end()}"
-                    self.code_editor.tag_add("function", start, end)
-            
-            list_cmds = ['список', 'добавить', 'удалить']
-            for cmd in list_cmds:
-                pattern = r'\b' + re.escape(cmd) + r'\b'
-                for match in re.finditer(pattern, line, re.IGNORECASE):
-                    start = f"1.{pos + match.start()}"
-                    end = f"1.{pos + match.end()}"
-                    self.code_editor.tag_add("list", start, end)
-            
-            for match in re.finditer(r'\b\d+(\.\d+)?\b', line):
-                start = f"1.{pos + match.start()}"
-                end = f"1.{pos + match.end()}"
-                self.code_editor.tag_add("number", start, end)
-            
-            operators = ['\+', '-', '\*', '/', '=', '>', '<', '>=', '<=', '==', '!=', '\^']
-            for op in operators:
-                for match in re.finditer(op, line):
-                    start = f"1.{pos + match.start()}"
-                    end = f"1.{pos + match.end()}"
-                    self.code_editor.tag_add("operator", start, end)
-            
-            pos += len(line) + 1
-        
-        self.code_editor.mark_set(tk.INSERT, cursor_pos)
+            self.code_editor.mark_set(tk.INSERT, cursor_pos)
+        except Exception as e:
+            print(f"Ошибка подсветки синтаксиса: {e}")
     
     def insert_sample_code(self):
         sample = f"""// Ri {RI_LANGUAGE_VERSION} - Интерактивный язык программирования
@@ -1244,7 +1353,10 @@ class RiIDE:
         self.breakpoints_listbox.delete(0, tk.END)
         
         if self.graphics_window:
-            self.graphics_window.close()
+            try:
+                self.graphics_window.close()
+            except:
+                pass
             self.graphics_window = None
         
         code = self.code_editor.get(1.0, tk.END)
@@ -1278,7 +1390,10 @@ class RiIDE:
         self.breakpoints_listbox.delete(0, tk.END)
         
         if self.graphics_window:
-            self.graphics_window.close()
+            try:
+                self.graphics_window.close()
+            except:
+                pass
             self.graphics_window = None
         
         code = self.code_editor.get(1.0, tk.END)
@@ -1290,29 +1405,35 @@ class RiIDE:
     def execute_code(self, code):
         try:
             def graphics_callback(commands):
-                self.graphics_queue.put(commands)
+                try:
+                    self.graphics_queue.put(commands)
+                except:
+                    pass
             
             def input_callback(type, prompt):
                 if type == "input":
-                    self.output_queue.put(("input_request", prompt))
-                    return self.input_queue.get()
+                    try:
+                        self.output_queue.put(("input_request", prompt))
+                        return self.input_queue.get(timeout=60)
+                    except:
+                        return ""
                 return ""
             
             def event_callback(type, data=""):
                 if type == "get_mouse_x":
-                    if self.graphics_window:
+                    if self.graphics_window and self.graphics_window.is_open:
                         return self.graphics_window.get_mouse_x()
                     return 0
                 elif type == "get_mouse_y":
-                    if self.graphics_window:
+                    if self.graphics_window and self.graphics_window.is_open:
                         return self.graphics_window.get_mouse_y()
                     return 0
                 elif type == "get_mouse_pressed":
-                    if self.graphics_window:
+                    if self.graphics_window and self.graphics_window.is_open:
                         return self.graphics_window.get_mouse_pressed()
                     return False
                 elif type == "get_key_pressed":
-                    if self.graphics_window:
+                    if self.graphics_window and self.graphics_window.is_open:
                         return self.graphics_window.get_key_pressed(data)
                     return False
                 elif type == "set_handler":
@@ -1323,9 +1444,21 @@ class RiIDE:
                 return ""
             
             def debug_callback(type, data=""):
-                self.debug_queue.put((type, data))
+                try:
+                    self.debug_queue.put((type, data))
+                except:
+                    pass
             
-            result = run_ri_code(
+            from ri_compiler import RiCompiler
+            self.compiler_instance = RiCompiler()
+            
+            # Передаем точки останова в компилятор
+            if self.debug_mode:
+                self.compiler_instance.debug_mode = True
+                for bp in self.line_numbers.get_breakpoints():
+                    self.compiler_instance.add_breakpoint(bp)
+            
+            result = self.compiler_instance.execute(
                 code, 
                 graphics_callback, 
                 input_callback, 
@@ -1340,13 +1473,15 @@ class RiIDE:
             self.debug_queue.put(("program_finished", ""))
             
         except Exception as e:
-            self.output_queue.put(("error", f"Ошибка выполнения: {str(e)}"))
+            error_msg = f"Ошибка выполнения: {str(e)}\n{traceback.format_exc()}"
+            self.output_queue.put(("error", error_msg))
             self.output_queue.put(("status", f"✗ Ошибка: {str(e)}"))
             self.debug_queue.put(("error", f"Ошибка выполнения: {str(e)}"))
         finally:
             self.is_running = False
             self.debug_mode = False
             self.is_paused = False
+            self.compiler_instance = None
     
     def process_queue(self):
         try:
@@ -1393,39 +1528,48 @@ class RiIDE:
                 commands = self.graphics_queue.get_nowait()
                 
                 for command in commands:
+                    if not command:
+                        continue
+                        
                     cmd_type = command[0]
                     
                     if cmd_type == 'window':
                         _, width, height, title = command
                         if self.graphics_window:
-                            self.graphics_window.close()
+                            try:
+                                self.graphics_window.close()
+                            except:
+                                pass
                         self.graphics_window = GraphicsWindow(width, height, title, self)
                         
-                    elif cmd_type == 'clear' and self.graphics_window:
+                    elif cmd_type == 'clear' and self.graphics_window and self.graphics_window.is_open:
                         _, color = command
                         self.graphics_window.clear(color)
                         
-                    elif cmd_type == 'rectangle' and self.graphics_window:
+                    elif cmd_type == 'rectangle' and self.graphics_window and self.graphics_window.is_open:
                         _, x, y, width, height, color = command
                         self.graphics_window.draw_rectangle(x, y, width, height, color)
                         
-                    elif cmd_type == 'circle' and self.graphics_window:
+                    elif cmd_type == 'circle' and self.graphics_window and self.graphics_window.is_open:
                         _, x, y, radius, color = command
                         self.graphics_window.draw_circle(x, y, radius, color)
                         
-                    elif cmd_type == 'line' and self.graphics_window:
+                    elif cmd_type == 'line' and self.graphics_window and self.graphics_window.is_open:
                         _, x1, y1, x2, y2, color = command
                         self.graphics_window.draw_line(x1, y1, x2, y2, color)
                         
-                    elif cmd_type == 'text' and self.graphics_window:
+                    elif cmd_type == 'text' and self.graphics_window and self.graphics_window.is_open:
                         _, x, y, text, color = command
                         self.graphics_window.draw_text(x, y, text, color)
                         
-                    elif cmd_type == 'update' and self.graphics_window:
+                    elif cmd_type == 'update' and self.graphics_window and self.graphics_window.is_open:
                         self.graphics_window.update_screen()
                 
-                if self.graphics_window:
-                    self.graphics_window.window.update()
+                if self.graphics_window and self.graphics_window.is_open:
+                    try:
+                        self.graphics_window.window.update()
+                    except:
+                        pass
         
         except Exception as e:
             pass
@@ -1438,16 +1582,19 @@ class RiIDE:
                 event = self.event_queue.get_nowait()
                 event_type = event[0]
                 
-                if self.graphics_window:
-                    self.mouse_label.config(
-                        text=f"Мышь: ({self.graphics_window.mouse_x}, {self.graphics_window.mouse_y}) " +
-                             f"{'Нажата' if self.graphics_window.mouse_pressed else 'Не нажата'}"
-                    )
-                    
-                    keys_text = "Клавиши: " + ", ".join(sorted(self.graphics_window.keys_pressed))
-                    if len(keys_text) > 50:
-                        keys_text = keys_text[:47] + "..."
-                    self.key_label.config(text=keys_text)
+                if self.graphics_window and self.graphics_window.is_open:
+                    try:
+                        self.mouse_label.config(
+                            text=f"Мышь: ({self.graphics_window.mouse_x}, {self.graphics_window.mouse_y}) " +
+                                 f"{'Нажата' if self.graphics_window.mouse_pressed else 'Не нажата'}"
+                        )
+                        
+                        keys_text = "Клавиши: " + ", ".join(sorted(self.graphics_window.keys_pressed))
+                        if len(keys_text) > 50:
+                            keys_text = keys_text[:47] + "..."
+                        self.key_label.config(text=keys_text)
+                    except:
+                        pass
                 
                 event_str = str(event)
                 self.events_listbox.insert(0, event_str)
@@ -1493,6 +1640,8 @@ class RiIDE:
                             var_type = "строка"
                         elif var_type == 'bool':
                             var_type = "булево"
+                        elif var_type == 'list':
+                            var_type = "список"
                         else:
                             var_type = str(var_type)
                         
@@ -1503,8 +1652,8 @@ class RiIDE:
                     self.stack_listbox.delete(0, tk.END)
                     self.call_stack = data
                     
-                    for item in data:
-                        self.stack_listbox.insert(0, item)
+                    for item in reversed(data):  # Исправлено: правильный порядок
+                        self.stack_listbox.insert(tk.END, item)
                     
                 elif msg_type == "program_stopped":
                     self.status_bar.config(text="■ Программа остановлена пользователем")
@@ -1531,7 +1680,10 @@ class RiIDE:
             self.input_frame.pack_forget()
             self.waiting_for_input = False
             
-            self.input_queue.put(user_input)
+            try:
+                self.input_queue.put(user_input)
+            except:
+                pass
             
             self.console_output.config(state=tk.NORMAL)
             self.console_output.insert(tk.END, user_input + "\n")
@@ -1541,27 +1693,32 @@ class RiIDE:
             self.input_entry.delete(0, tk.END)
     
     def debug_continue(self):
-        if self.debug_mode and self.is_paused:
+        if self.debug_mode and self.is_paused and self.compiler_instance:
+            self.compiler_instance.continue_execution()
             self.is_paused = False
             self.status_bar.config(text="▶ Продолжение выполнения...")
     
     def debug_pause(self):
-        if self.debug_mode and self.is_running and not self.is_paused:
+        if self.debug_mode and self.is_running and not self.is_paused and self.compiler_instance:
+            self.compiler_instance.pause_execution()
             self.is_paused = True
             self.status_bar.config(text="⏸ Выполнение приостановлено")
     
     def debug_step_over(self):
-        if self.debug_mode and self.is_paused:
+        if self.debug_mode and self.is_paused and self.compiler_instance:
+            self.compiler_instance.step_over()
             self.is_paused = False
             self.status_bar.config(text="➡ Шаг вперед...")
     
     def debug_step_into(self):
-        if self.debug_mode and self.is_paused:
+        if self.debug_mode and self.is_paused and self.compiler_instance:
+            self.compiler_instance.step_into()
             self.is_paused = False
             self.status_bar.config(text="⬇ Шаг внутрь...")
     
     def debug_step_out(self):
-        if self.debug_mode and self.is_paused:
+        if self.debug_mode and self.is_paused and self.compiler_instance:
+            self.compiler_instance.step_out()
             self.is_paused = False
             self.status_bar.config(text="⬆ Шаг наружу...")
     
@@ -1573,28 +1730,30 @@ class RiIDE:
             messagebox.showwarning("Внимание", "Нельзя изменять точки останова во время выполнения программы!")
             return
         
-        cursor_pos = self.code_editor.index(tk.INSERT)
-        line_num = int(cursor_pos.split('.')[0])
-        
-        if line_num in self.line_numbers.breakpoints:
-            self.line_numbers.breakpoints.remove(line_num)
-            self.status_bar.config(text=f"✓ Точка останова удалена в строке {line_num}")
-        else:
-            self.line_numbers.breakpoints.add(line_num)
-            self.status_bar.config(text=f"✓ Точка останова установлена в строке {line_num}")
-        
-        self.line_numbers._redraw()
-        self.breakpoints_listbox.delete(0, tk.END)
-        for bp in sorted(self.line_numbers.breakpoints):
-            self.breakpoints_listbox.insert(tk.END, f"Строка {bp}")
+        try:
+            cursor_pos = self.code_editor.index(tk.INSERT)
+            line_num = int(cursor_pos.split('.')[0])
+            
+            if line_num in self.line_numbers.breakpoints:
+                self.line_numbers.breakpoints.remove(line_num)
+                self.status_bar.config(text=f"✓ Точка останова удалена в строке {line_num}")
+            else:
+                self.line_numbers.breakpoints.add(line_num)
+                self.status_bar.config(text=f"✓ Точка останова установлена в строке {line_num}")
+            
+            self.line_numbers._redraw()
+            self.breakpoints_listbox.delete(0, tk.END)
+            for bp in sorted(self.line_numbers.breakpoints):
+                self.breakpoints_listbox.insert(tk.END, f"Строка {bp}")
+        except:
+            pass
     
     def clear_all_breakpoints(self):
         if self.is_running:
             messagebox.showwarning("Внимание", "Нельзя изменять точки останова во время выполнения программы!")
             return
         
-        self.line_numbers.breakpoints.clear()
-        self.line_numbers._redraw()
+        self.line_numbers.clear_all_breakpoints()
         self.breakpoints_listbox.delete(0, tk.END)
         self.status_bar.config(text="✓ Все точки останова очищены")
     
@@ -1604,28 +1763,31 @@ class RiIDE:
             return
         
         if self.git_integration:
-            if messagebox.askyesno("Подтверждение", "Git уже инициализирован. Переинициализировать?"):
-                pass
-            else:
+            if not messagebox.askyesno("Подтверждение", "Git уже инициализирован. Переинициализировать?"):
                 return
         
         try:
             git_dir = os.path.join(self.current_project_path, '.git')
             if os.path.exists(git_dir):
+                if not messagebox.askyesno("Подтверждение", "Репозиторий уже существует. Удалить и создать заново?"):
+                    return
                 import shutil
                 shutil.rmtree(git_dir)
             
             self.git_integration = GitIntegration(self.current_project_path)
             if self.git_integration.init_repository():
+                # Создаем .gitignore
                 gitignore_path = os.path.join(self.current_project_path, '.gitignore')
                 with open(gitignore_path, 'w', encoding='utf-8') as f:
-                    f.write("# Ri IDE\n*.pyc\n__pycache__/\n*.riproj\n")
+                    f.write("# Ri IDE\n*.pyc\n__pycache__/\n*.riproj\n*.log\n")
                 
+                # Создаем README
                 readme_path = os.path.join(self.current_project_path, 'README.md')
                 if not os.path.exists(readme_path):
                     with open(readme_path, 'w', encoding='utf-8') as f:
                         f.write(f"# Ri Project\n\nСоздано в Ri IDE v{self.ide_version} от {RI_LANGUAGE_CREATOR}\n")
                 
+                # Первый коммит
                 self.git_integration.commit_changes("Initial commit")
                 
                 self.git_label.config(text="Git: инициализирован", foreground="green")
@@ -1775,7 +1937,7 @@ class RiIDE:
                             messagebox.showerror("Ошибка", f"Не удалось переключиться на ветку {branch_name}")
             
             def create_branch():
-                new_branch = tk.simpledialog.askstring("Новая ветка", "Введите имя новой ветки:")
+                new_branch = simpledialog.askstring("Новая ветка", "Введите имя новой ветки:")
                 if new_branch:
                     if self.git_integration.create_branch(new_branch):
                         branches.append(new_branch)
@@ -1878,13 +2040,16 @@ class RiIDE:
                 messagebox.showerror("Ошибка", f"Не удалось открыть проект: {str(e)}")
     
     def open_graphics_window(self):
-        if not self.graphics_window:
+        if not self.graphics_window or not self.graphics_window.is_open:
             self.graphics_window = GraphicsWindow(ide=self)
         else:
-            self.graphics_window.window.lift()
+            try:
+                self.graphics_window.window.lift()
+            except:
+                self.graphics_window = GraphicsWindow(ide=self)
     
     def clear_graphics(self):
-        if self.graphics_window:
+        if self.graphics_window and self.graphics_window.is_open:
             self.graphics_window.clear()
     
     def insert_draw_example(self):
@@ -2265,6 +2430,14 @@ class RiIDE:
         self.status_bar.config(text="■ Выполнение остановлено")
         self.debug_label.config(text="Отладка: выключена", foreground="gray")
         self.line_numbers.clear_execution_line()
+        
+        if self.compiler_instance:
+            # Останавливаем компилятор
+            try:
+                self.compiler_instance.is_paused = False
+                self.compiler_instance.debug_mode = False
+            except:
+                pass
     
     def clear_console(self):
         self.console_output.config(state=tk.NORMAL)
