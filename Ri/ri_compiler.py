@@ -157,13 +157,7 @@ class RiCompiler:
                     
                 elif line.startswith('задержка '):
                     self.handle_delay_command(line[8:].strip())
-else:
-    if '(' in line and ')' in line and not line.startswith('//'):
-        result = self.call_builtin_function(line)
-        if result is not None and '=' in line:
-            var_name = line.split('=')[0].strip()
-            self.variables[var_name] = result
-                
+                    
                 elif line.startswith('очистить '):
                     self.handle_clear_command(line[8:].strip())
                     
@@ -210,11 +204,26 @@ else:
                     pass
                     
                 else:
+                    # Исправление 1: Обработка вызовов функций без присваивания
                     if '(' in line and ')' in line and not line.startswith('//'):
-                        result = self.call_builtin_function(line)
-                        if result is not None and '=' in line:
-                            var_name = line.split('=')[0].strip()
-                            self.variables[var_name] = result
+                        # Если есть присваивание, например: перем x = случайно(1, 100)
+                        if '=' in line:
+                            parts = line.split('=', 1)
+                            if len(parts) == 2:
+                                var_name = parts[0].strip()
+                                expr = parts[1].strip()
+                                if '(' in expr and ')' in expr:
+                                    # Это вызов функции
+                                    result = self.evaluate_expression(expr)
+                                    self.variables[var_name] = result
+                                else:
+                                    # Обычное выражение
+                                    value = self.evaluate_expression(expr)
+                                    self.variables[var_name] = value
+                        else:
+                            # Просто вызов функции без присваивания
+                            self.evaluate_expression(line)
+                    
                     elif '=' in line:
                         parts = line.split('=', 1)
                         if len(parts) == 2:
@@ -228,6 +237,7 @@ else:
                 self.output_lines.append(error_msg)
                 if self.debug_callback:
                     self.debug_callback("error", error_msg)
+                # Не прерываем выполнение, продолжаем со следующей строки
                 
             i += 1
         
@@ -267,6 +277,9 @@ else:
             expr = parts[1].strip()
             value = self.evaluate_expression(expr)
             self.variables[var_name] = value
+        else:
+            # Объявление без присваивания
+            self.variables[line] = 0
     
     def handle_list_declaration(self, line):
         if '=' in line:
@@ -286,6 +299,9 @@ else:
                     self.lists[list_name] = []
             else:
                 self.lists[list_name] = []
+        else:
+            # Объявление списка без присваивания
+            self.lists[line] = []
     
     def handle_list_append(self, line):
         parts = line.split(',')
@@ -296,6 +312,9 @@ else:
             
             if list_name in self.lists:
                 self.lists[list_name].append(value)
+            else:
+                # Если список не существует, создаем его
+                self.lists[list_name] = [value]
     
     def handle_list_remove(self, line):
         parts = line.split(',')
@@ -325,30 +344,28 @@ else:
             else_pos = -1
             end_pos = -1
             depth = 0
-            j = start_idx + 1
             
-            while j < len(lines):
+            # Исправление 2: Ищем конец блока
+            for j in range(start_idx, len(lines)):
                 check_line = lines[j].strip()
                 if check_line.startswith('//') or not check_line:
-                    j += 1
                     continue
                     
-                if check_line == 'конец':
+                if check_line.startswith('если '):
+                    depth += 1
+                elif check_line == 'иначе' and depth == 1:  # Исправлено: depth == 1
+                    else_pos = j
+                elif check_line == 'конец':
+                    depth -= 1
                     if depth == 0:
                         end_pos = j
                         break
-                    depth -= 1
-                elif check_line.startswith('если '):
-                    depth += 1
-                elif check_line == 'иначе' and depth == 0:
-                    else_pos = j
-                    
-                j += 1
             
             if end_pos == -1:
                 return start_idx + 1
             
             if condition:
+                # Выполняем блок от if до else или до конца
                 block_end = else_pos if else_pos != -1 else end_pos
                 k = start_idx + 1
                 while k < block_end:
@@ -356,6 +373,7 @@ else:
                     k += 1
                 return end_pos
             else:
+                # Выполняем блок else если есть
                 if else_pos != -1:
                     k = else_pos + 1
                     while k < end_pos:
@@ -371,23 +389,20 @@ else:
         
         end_pos = -1
         depth = 0
-        j = start_idx + 1
         
-        while j < len(lines):
+        # Находим конец цикла
+        for j in range(start_idx, len(lines)):
             check_line = lines[j].strip()
             if check_line.startswith('//') or not check_line:
-                j += 1
                 continue
                 
-            if check_line == 'конец':
+            if check_line.startswith('цикл '):
+                depth += 1
+            elif check_line == 'конец':
+                depth -= 1
                 if depth == 0:
                     end_pos = j
                     break
-                depth -= 1
-            elif check_line.startswith('цикл ') or check_line.startswith('если '):
-                depth += 1
-                
-            j += 1
         
         if end_pos == -1:
             return start_idx + 1
@@ -400,6 +415,7 @@ else:
             if self.debug_callback:
                 self.debug_callback("call_stack_updated", self.call_stack)
             
+            # Выполняем тело цикла
             k = start_idx + 1
             while k < end_pos:
                 self.execute_single_line(lines[k].strip(), input_callback, event_callback)
@@ -408,6 +424,7 @@ else:
             self.call_stack.pop()
             iteration_count += 1
             
+            # Проверяем условие снова
             if not self.evaluate_expression(condition_expr):
                 break
         
@@ -470,6 +487,14 @@ else:
             self.graphics_commands.append(command)
             if self.graphics_callback:
                 self.graphics_callback([command])
+        elif '=' in line:
+            # Обработка присваиваний внутри блоков
+            parts = line.split('=', 1)
+            if len(parts) == 2:
+                var_name = parts[0].strip()
+                expr = parts[1].strip()
+                value = self.evaluate_expression(expr)
+                self.variables[var_name] = value
     
     def handle_window_command(self, params):
         parts = params.split()
@@ -582,9 +607,11 @@ else:
     
     def call_builtin_function(self, line):
         try:
+            # Убираем возможное присваивание в начале
             if '=' in line:
                 parts = line.split('=', 1)
-                line = parts[1].strip()
+                if len(parts) == 2:
+                    line = parts[1].strip()
             
             func_name = line.split('(')[0].strip()
             args_str = line.split('(')[1].split(')')[0].strip()
@@ -666,11 +693,13 @@ else:
         try:
             expr = expr.strip()
             
+            # Обработка вызовов функций
             if '(' in expr and ')' in expr:
                 func_name = expr.split('(')[0].strip()
                 if func_name in self.builtin_functions:
                     return self.call_builtin_function(expr)
             
+            # Обработка доступа к элементам списка
             if '[' in expr and ']' in expr:
                 list_name = expr.split('[')[0].strip()
                 index_expr = expr.split('[')[1].split(']')[0].strip()
@@ -681,6 +710,7 @@ else:
                         return self.lists[list_name][index]
                     return 0
             
+            # Обработка вложенных скобок
             if '(' in expr and ')' in expr:
                 while '(' in expr and ')' in expr:
                     start = expr.rfind('(')
@@ -690,6 +720,7 @@ else:
                         inner_result = self.evaluate_expression(inner)
                         expr = expr[:start] + str(inner_result) + expr[end+1:]
             
+            # Логические операторы
             if ' не ' in expr or expr.startswith('не '):
                 if ' не ' in expr:
                     parts = expr.split(' не ')
@@ -720,6 +751,7 @@ else:
                         break
                 return result
             
+            # Операторы сравнения
             comparisons = ['>=', '<=', '==', '!=', '>', '<']
             for op in comparisons:
                 if op in expr:
@@ -741,22 +773,23 @@ else:
                         elif op == '!=':
                             return left != right
             
+            # Арифметические операторы
             if '+' in expr:
                 parts = expr.split('+')
-                result = 0
-                for part in parts:
+                result = self._evaluate_simple(parts[0].strip())
+                for part in parts[1:]:
                     result += self._evaluate_simple(part.strip())
                 return result
             
-            if '-' in expr and expr.count('-') == 1 and not expr.startswith('-'):
+            if '-' in expr:
                 parts = expr.split('-')
-                if len(parts) == 2:
+                if len(parts) == 2 and not expr.startswith('-'):
                     return self._evaluate_simple(parts[0].strip()) - self._evaluate_simple(parts[1].strip())
             
             if '*' in expr:
                 parts = expr.split('*')
-                result = 1
-                for part in parts:
+                result = self._evaluate_simple(parts[0].strip())
+                for part in parts[1:]:
                     result *= self._evaluate_simple(part.strip())
                 return result
             
@@ -785,15 +818,18 @@ else:
     def _evaluate_simple(self, expr: str):
         expr = expr.strip()
         
+        # Строки
         if expr.startswith('"') and expr.endswith('"'):
             return expr[1:-1]
         
         if expr.startswith("'") and expr.endswith("'"):
             return expr[1:-1]
         
+        # Списки
         if expr.startswith('[') and expr.endswith(']'):
             return expr
         
+        # Числа
         try:
             if '.' in expr:
                 return float(expr)
@@ -802,17 +838,21 @@ else:
         except:
             pass
         
+        # Переменные
         if expr in self.variables:
             return self.variables[expr]
         
+        # Списки
         if expr in self.lists:
             return f"список[{len(self.lists[expr])} элементов]"
         
+        # Булевы значения
         if expr.lower() == 'истина':
             return True
         elif expr.lower() == 'ложь':
             return False
         
+        # Специальные переменные
         if expr == 'мышь_х':
             return self.last_mouse_x
         elif expr == 'мышь_у':
@@ -820,6 +860,7 @@ else:
         elif expr == 'мышь_нажата':
             return self.last_mouse_pressed
         
+        # Если ничего не подошло, возвращаем 0
         return 0
     
     def _to_bool(self, value):
